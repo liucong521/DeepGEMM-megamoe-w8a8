@@ -191,6 +191,30 @@ def staged_pack5_shape_supported(
     )
 
 
+def w4a8_shape_supported(
+    *,
+    num_ranks: int,
+    num_experts: int,
+    num_topk: int,
+    hidden: int,
+    intermediate_hidden: int,
+) -> bool:
+    """W4A8 uses dynamic expert routing with the existing 512-expert limit."""
+    return (
+        num_ranks in (4, 8)
+        and 0 < num_experts <= 512
+        and num_experts % num_ranks == 0
+        and hidden % 512 == 0
+        and intermediate_hidden % 256 == 0
+        and staged_pack5_model_shape_supported(
+            num_experts=num_experts,
+            num_topk=num_topk,
+            hidden=hidden,
+            intermediate_hidden=intermediate_hidden,
+        )
+    )
+
+
 def staged_v3_capability_supported(
     *,
     quant: str,

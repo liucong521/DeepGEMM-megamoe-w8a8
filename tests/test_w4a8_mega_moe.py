@@ -3,6 +3,7 @@
 Run from outside the source root after ``python setup.py install``:
   python /path/to/repo/tests/test_w4a8_mega_moe.py --gemm
   torchrun --standalone --nproc-per-node=8 /path/to/repo/tests/test_w4a8_mega_moe.py
+  torchrun --standalone --nproc-per-node=4 /path/to/repo/tests/test_w4a8_mega_moe.py
 """
 
 import argparse
@@ -30,7 +31,11 @@ def reference_gemm(x, weight, out, indices):
     # The installed HIPC reference decodes signed INT4 into its high nibble
     # (q * 16); MegaMoE uses q directly with true per-channel scales.
     # SGLang converts loader scales in the inverse direction at model load.
-    return _reference_gemm(x, (weight[0], weight[1] / 16.0), out, indices)
+    # These fixtures pad expert segments to 64 rows. Newer DeepGEMM
+    # defaults to mode 1006, whose expert segments require 128-row padding.
+    return _reference_gemm(
+        x, (weight[0], weight[1] / 16.0), out, indices, config={"MODE": 1002}
+    )
 
 
 def packed_weight(e, n, k):
@@ -66,7 +71,7 @@ def timing(fn, byte_count, warmup=10, iterations=100):
 
 
 def test_gemm(args):
-    e = args.experts // 8
+    e = args.experts // args.ep_size
     for n, k in ((2 * args.intermediate, args.hidden), (args.hidden, args.intermediate)):
         weight, integer = packed_weight(e, n, k)
         for valid_per_expert in (1, 63, 64, 65, args.tokens):
@@ -150,8 +155,10 @@ def test_distributed(args):
     torch.cuda.set_device(local_rank)
     dist.init_process_group("nccl")
     rank = dist.get_rank()
+    ranks = dist.get_world_size()
+    assert ranks in (4, 8) and args.experts % ranks == 0
     torch.manual_seed(100 + rank)
-    e = args.experts // 8
+    e = args.experts // ranks
     l1, _ = packed_weight(e, 2 * args.intermediate, args.hidden)
     l2, _ = packed_weight(e, args.hidden, args.intermediate)
     capacity = ((args.tokens + 63) // 64) * 64
@@ -164,10 +171,10 @@ def test_distributed(args):
         for case in ("uniform", "skew", "ragged", "empty", "static_map"):
             tokens = args.tokens if case != "empty" else 0
             if case == "ragged":
-                tokens = args.tokens * rank // 7
+                tokens = args.tokens * rank // (ranks - 1)
             group_map = None
             if case == "static_map":
-                logical_ids = torch.arange(args.experts, device="cuda").reshape(-1, 8).T.contiguous().flatten()
+                logical_ids = torch.arange(args.experts, device="cuda").reshape(-1, ranks).T.contiguous().flatten()
                 group_map = (logical_ids // e).to(torch.int32)
             x = torch.randn((args.tokens, args.hidden), device="cuda", dtype=torch.bfloat16) * .1
             ids = torch.rand((args.tokens, args.experts), device="cuda").topk(args.topk, dim=1).indices
@@ -178,7 +185,7 @@ def test_distributed(args):
             weights /= weights.sum(1, keepdim=True)
             gathered = []
             for t in (x, ids, weights):
-                parts = [torch.empty_like(t) for _ in range(8)]
+                parts = [torch.empty_like(t) for _ in range(ranks)]
                 dist.all_gather(parts, t)
                 gathered.append(torch.stack(parts))
             qx, sx = per_token_quant_int8(x)
@@ -202,7 +209,7 @@ def test_distributed(args):
                         and hasattr(buf, "_w4a8_active_rows")):
                     needed = int(buf._w4a8_active_rows.item())
                     allocated = buf._w4a8_workspace[0][0]
-                    bound = 8 * buf.num_max_tokens_per_rank * args.topk + e * 63
+                    bound = ranks * buf.num_max_tokens_per_rank * args.topk + e * 63
                     assert needed <= allocated <= ((bound + 63) // 64) * 64, (needed, allocated)
                     assert buf._w4a8_workspace_allocations == 1
                 mismatch = (y != ref).sum()
@@ -218,7 +225,7 @@ def test_distributed(args):
                 dist.barrier()
                 torch.cuda.synchronize()
                 if rank == 0:
-                    print(json.dumps(dict(test="moe", case=case, clamp=clamp,
+                    print(json.dumps(dict(test="moe", case=case, clamp=clamp, ep=ranks,
                                           correctness="exact DeepGEMM composition parity")), flush=True)
         if not args.correctness_only:
             x, qx, sx, ids, weights, y, benchmark_groups = benchmark_inputs
@@ -270,6 +277,8 @@ def test_distributed(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--gemm", action="store_true")
+    parser.add_argument("--ep-size", type=int, choices=(4, 8), default=8,
+                        help="Expert parallel size for the standalone GEMM test")
     parser.add_argument("--correctness-only", action="store_true")
     parser.add_argument("--paired-scatter", action="store_true")
     parser.add_argument("--include-input-staging", action="store_true")

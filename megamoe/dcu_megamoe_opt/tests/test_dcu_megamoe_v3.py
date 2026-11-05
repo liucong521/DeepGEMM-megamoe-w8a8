@@ -313,6 +313,36 @@ def test_v3_model_shape_registry_supports_dynamic_fp8_shape():
     assert "hidden divisible by 256" in config.STAGED_PACK5_SHAPE_CONTRACT
 
 
+@pytest.mark.parametrize("num_ranks", [4, 8])
+@pytest.mark.parametrize("num_experts", [256, 384, 512])
+def test_w4a8_shape_gate_supports_ep4_and_ep8(num_ranks, num_experts):
+    config = load_module("dcu_megamoe_w4a8_config", V3_CONFIG_PATH)
+    assert config.w4a8_shape_supported(
+        num_ranks=num_ranks, num_experts=num_experts, num_topk=6,
+        hidden=5120, intermediate_hidden=2304,
+    )
+    if num_ranks == 4:
+        assert not config.staged_pack5_shape_supported(
+            num_ranks=num_ranks, num_experts=num_experts, num_topk=6,
+            hidden=5120, intermediate_hidden=2304,
+        )
+
+
+@pytest.mark.parametrize("override", [
+    {"num_ranks": 0}, {"num_ranks": 2}, {"num_ranks": 16},
+    {"num_experts": 0}, {"num_experts": 385}, {"num_experts": 516},
+    {"num_topk": 0}, {"num_topk": 385}, {"hidden": 0},
+    {"hidden": 4864}, {"intermediate_hidden": 0},
+    {"intermediate_hidden": 2176}, {"intermediate_hidden": 4352},
+])
+def test_w4a8_shape_gate_rejects_invalid_shapes(override):
+    config = load_module("dcu_megamoe_w4a8_invalid", V3_CONFIG_PATH)
+    shape = dict(num_ranks=4, num_experts=384, num_topk=6,
+                 hidden=5120, intermediate_hidden=2304)
+    shape.update(override)
+    assert not config.w4a8_shape_supported(**shape)
+
+
 def test_v3_capability_gate_supports_dynamic_normal_fp8_and_scopes_ygzp_int8():
     config = load_module("dcu_megamoe_v3_config_capabilities", V3_CONFIG_PATH)
 

@@ -19,6 +19,7 @@ from .dcu_megamoe_opt.v3_config import (
     staged_pack5_model_shape_supported,
     staged_pack5_shape_supported,
     staged_v3_capability_supported,
+    w4a8_shape_supported,
 )
 from .dcu_megamoe_opt.v3_layout import (
     flatten_pack5_weight,
@@ -555,12 +556,15 @@ class SymmBuffer:
         if w4a8_compute:
             if num_max_tokens_per_rank % 4:
                 raise ValueError("W4A8 symmetric capacity must be divisible by 4; use get_symm_buffer_for_mega_moe for automatic padding")
-            _check_staged_pack5_shape(
+            if not w4a8_shape_supported(
                 num_ranks=group.size(), num_experts=num_experts, num_topk=num_topk,
                 hidden=hidden, intermediate_hidden=intermediate_hidden,
-            )
-            if group.size() != 8 or hidden % 512 or intermediate_hidden % 256:
-                raise ValueError("W4A8 HIPC requires EP8, hidden % 512 == 0, intermediate % 256 == 0")
+            ):
+                raise ValueError(
+                    "W4A8 HIPC requires EP4/EP8, at most 512 global experts "
+                    "divisible by EP ranks, valid topk, hidden divisible by 512, "
+                    "and intermediate divisible by 256 and in [256, 4096]"
+                )
         elif int8_compute:
             if not staged_v3_capability_supported(
                 quant=self.quant_mode,

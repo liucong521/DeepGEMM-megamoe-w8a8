@@ -1,4 +1,4 @@
-"""Packed INT4 / INT8 HIPC MegaMoE for EP8 prefill."""
+"""Packed INT4 / INT8 HIPC MegaMoE for EP4/EP8 prefill."""
 
 import logging
 import os

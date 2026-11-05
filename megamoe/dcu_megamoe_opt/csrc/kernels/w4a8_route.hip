@@ -349,7 +349,7 @@ void gather_routes(torch::Tensor sym, torch::Tensor offsets, torch::Tensor route
         (uint8_t*)sym.data_ptr(), p, counts.data_ptr<int>(), offsets.data_ptr<int>(),
         routes.data_ptr<int>(), indices.data_ptr<int>(), inverse_ptr, route_weights_ptr);
     if (rows && device_rows && inverse_ptr && topk <= 32) {
-       hipLaunchKernelGGL(( gather_tokens_kernel), dim3(ranks * capacity), dim3(128), 0, stream,
+       hipLaunchKernelGGL(( gather_tokens_kernel), dim3(ranks * capacity), dim3(128), 0, stream, 
             (uint8_t*)sym.data_ptr(), p, inverse_ptr,
             reinterpret_cast<int4*>(x.data_ptr<int8_t>()), scales.data_ptr<float>());
     } else if (rows) {

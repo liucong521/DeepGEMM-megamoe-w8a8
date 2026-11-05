@@ -88,8 +88,8 @@ __global__ void gather_kernel(uint8_t* sym, RouteLayout p, const int* routes,
 // Read each peer token once and fan it out to this rank's expert rows.
 __global__ void gather_tokens_kernel(uint8_t* sym, RouteLayout p, const int* inverse,
                                      int4* x, float* scales) {
-    const int source = (blockIdx.x + p.rank) & 7;
-    const int token = blockIdx.x >> 3;
+    const int source = (blockIdx.x + p.rank) % p.ranks;
+    const int token = blockIdx.x / p.ranks;
     const int task_base = (source * p.capacity + token) * p.topk;
     unsigned slots = 0;
     for (int slot = 0; slot < p.topk; ++slot) {
@@ -159,7 +159,7 @@ __global__ void combine_kernel(uint8_t* sym, RouteLayout p, const int* group_map
     float total[8] = {};
     // Match LightOp EP gather's FP32 FMA, BF16 rank partial, then DeepEP's
     // FP32 rank reduction. A canonical map preserves this rounding under EPLB.
-    for (int owner = 0; owner < 8; ++owner) {
+    for (int owner = 0; owner < p.ranks; ++owner) {
         float partial[8] = {};
         bool present = false;
         for (int slot = 0; slot < p.topk; ++slot) {
@@ -203,11 +203,11 @@ __global__ void combine_topk6_kernel(uint8_t* sym, RouteLayout p, const int* gro
     for (int slot = 0; slot < 6; ++slot) {
         const int64_t expert = ids[slot];
         if (expert < 0 || expert >= p.experts) continue;
-        const int owner = group_map ? group_map[expert] : int(expert) / (p.experts / 8);
-        if (owner >= 0 && owner < 8) owner_slots |= uint64_t(1) << (owner * 8 + slot);
+        const int owner = group_map ? group_map[expert] : int(expert) / (p.experts / p.ranks);
+        if (owner >= 0 && owner < p.ranks) owner_slots |= uint64_t(1) << (owner * 8 + slot);
     }
     float total[8] = {};
-    for (int owner = 0; owner < 8; ++owner) {
+    for (int owner = 0; owner < p.ranks; ++owner) {
         unsigned slots = unsigned(owner_slots >> (owner * 8)) & 0xffu;
         if (!slots) continue;
         if constexpr (RankPartials) {
@@ -243,8 +243,8 @@ __global__ void scatter_rank_partials_kernel(uint8_t* sym, RouteLayout p,
                                              const uint4* down) {
     asm volatile("buffer_wbinvl1_vol\n" ::: "memory");
     // Spread peer writes across destinations instead of source-major bursts.
-    const int source = (blockIdx.x + p.rank) & 7;
-    const int token = blockIdx.x >> 3;
+    const int source = (blockIdx.x + p.rank) % p.ranks;
+    const int token = blockIdx.x / p.ranks;
     auto* peer = dcu_peer_sym_buffer_ptrs(sym)[source];
     const int task_base = (source * p.capacity + token) * 6;
     unsigned slot_mask = 0;
@@ -281,10 +281,10 @@ RouteLayout layout(const torch::Tensor& sym, int ranks, int experts, int capacit
                    int topk, int hidden, int rank) {
     TORCH_CHECK(sym.is_cuda() && sym.is_contiguous() && sym.element_size() == 1,
                 "sym must be a contiguous device byte buffer");
-    TORCH_CHECK(ranks == 8 && experts > 0 && experts % ranks == 0 &&
-                experts / ranks <= 64 && capacity > 0 && capacity % 4 == 0 && topk > 0 && topk <= experts &&
+    TORCH_CHECK((ranks == 4 || ranks == 8) && experts > 0 && experts <= 512 && experts % ranks == 0 &&
+                capacity > 0 && capacity % 4 == 0 && topk > 0 && topk <= experts &&
                 hidden > 0 && hidden % 512 == 0 && rank >= 0 && rank < ranks,
-                "W4A8 requires EP8, <=64 local experts, hidden multiple of 512, capacity multiple of 4, valid topk/rank");
+                "W4A8 requires EP4/EP8, <=512 global experts, hidden multiple of 512, capacity multiple of 4, valid topk/rank");
     const int64_t bytes = combine_token_offset(ranks, experts, capacity, topk, hidden)
         + int64_t(capacity) * topk * hidden * 2;
     TORCH_CHECK(sym.numel() >= bytes, "symmetric buffer is too small");
